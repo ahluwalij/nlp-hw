@@ -36,7 +36,7 @@ class ToyTfIdfGuesser(Guesser):
     def __init__(self, filename, max_vocab_size=10000,
                  tokenize_function=TreebankWordTokenizer().tokenize,
                  normalize_function=lower, unk_cutoff=2):
-        self._vocab_size = -1
+        self._vocab_size = -1  # Placeholder until finalized
         self._max_vocab_size = max_vocab_size
         self._total_docs = 0
 
@@ -44,7 +44,7 @@ class ToyTfIdfGuesser(Guesser):
         self._vocab_final = False
         self._docs_final = False
         
-        self._vocab = {}
+        self._vocab = {}  # word -> id mapping
         self._docs = None
         self._labels = []
         self._unk_cutoff = unk_cutoff
@@ -55,7 +55,7 @@ class ToyTfIdfGuesser(Guesser):
         self.filename = filename
 
         # Add your code here!
-        self._doc_counts = FreqDist()
+        self._doc_counts = FreqDist()  # For global word frequencies
 
     def train(self, training_data, answer_field='page', split_by_sentence=False):
         # Extract the data into self.answers, self.questions
@@ -104,15 +104,10 @@ class ToyTfIdfGuesser(Guesser):
         assert max_n_guesses == 1, "We only support top guess"
         
         question_tfidf = self.embed(question).reshape(1, -1)
-
-        # This code is wrong, you need to fix it.  You'll want to use "argmax" and perhapse "reshape"
-        best = 0
-        cosine = np.zeros(5)
-        
-        
-        return [{"question": self.questions[best],
-                 "guess": self.answers[best],
-                 "confidence": cosine[best]}]
+        similarities = cosine_similarity(question_tfidf, self._doc_vectors)[0]
+        best = similarities.argmax()
+        print(f"[__call__] Best match index: {best}, Similarity: {similarities[best]}. (Expected: Highest similarity index and value)")
+        return [{"question": self.questions[best], "guess": self.answers[best], "confidence": similarities[best]}]
 
     def save(self):
         path = self.filename
@@ -164,9 +159,12 @@ class ToyTfIdfGuesser(Guesser):
 
         assert not self._vocab_final, \
             "Trying to add new words to finalized vocab"
+        print(f"[vocab_seen] Before: Word '{word}' has {self._doc_counts[word]} occurrences.")
+        
+        self._doc_counts[word] += count  # Track global word frequency
 
-        # Add your code here!
-
+        print(f"[vocab_seen] After: Word '{word}' should now have {self._doc_counts[word]} occurrences. (Expected: Previous + {count})")
+        
     def scan_document(self, text: str):
         """
         Tokenize a piece of text and compute the document frequencies.
@@ -176,15 +174,15 @@ class ToyTfIdfGuesser(Guesser):
 
         assert self._vocab_final, "scan_document can only be run with finalized vocab"
         assert not self._docs_final, "scan_document can only be run with non-finalized doc counts"
+        
+        print(f"[scan_document] Scanning document. Current doc count: {self._total_docs}.")
+        for word in self._tokenizer(text):
+            # Map to <UNK> if infrequent
+            word = word if word in self._vocab else kUNK
+            self._doc_counts[word] += 1  
 
-        tokenized = list(self.tokenize(text))
-        if len(tokenized) == 0:
-            logging.warning("Empty doc: %30s, tokenize: %30s, vocab: %30s" % (text, str(tokenized), " ".join(self._vocab.keys())))
-
-        for word in tokenized:
-            # You'll need to add code here!
-            None
         self._total_docs += 1
+        print(f"[scan_document] New total doc count: {self._total_docs}. Expected: Previous count + 1.")
         
     def embed(self, text):
         # You don't need to modify this code
@@ -235,7 +233,10 @@ class ToyTfIdfGuesser(Guesser):
         word -- The integer lookup of the word.
         """
 
-        return 0.0
+        word_str = self.vocab_key(word)
+        freq = self._doc_counts[word_str] / sum(self._doc_counts.values())
+        print(f"[global_freq] Frequency of '{word_str}': {freq}. (Expected: Calculated based on total occurrences)")
+        return freq
 
     def inv_docfreq(self, word: int) -> float:
         """Compute the inverse document frequency of a word.  Return 0.0 if
@@ -248,7 +249,17 @@ class ToyTfIdfGuesser(Guesser):
         """
         assert self._docs_final, "Documents must be finalized"
         
-        return 0.0
+        doc_freq = self._doc_freq.get(word, 0)
+        inv_df = log10(self._total_docs / (1 + doc_freq)) if doc_freq else 0
+        print(f"[inv_docfreq] IDF of word ID {word} ('{self.vocab_key(word)}'): {inv_df}. (Expected: Based on formula)")
+        return inv_df
+
+    def vocab_key(self, word_id):
+        """Helper to get the word string given the vocab ID"""
+        for word, id in self._vocab.items():
+            if id == word_id:
+                return word
+        return kUNK
 
     def vocab_lookup(self, word: str) -> int:
         """
@@ -277,22 +288,21 @@ class ToyTfIdfGuesser(Guesser):
         Fixes the vocabulary as static, prevents keeping additional vocab from
         being added
         """
+        print(f"[finalize_vocab] Total unique words before pruning: {len(self._doc_counts)}. Expected: Depends on dataset.")
+        # Construct vocabulary keeping words above _unk_cutoff
+        sorted_counts = sorted(self._doc_counts.items(), key=lambda x: x[1], reverse=True)
+        self._vocab = {word: i for i, (word, count) in enumerate(sorted_counts[:self._max_vocab_size])
+                       if count >= self._unk_cutoff}
 
-        # Add code to generate the vocabulary that the vocab lookup
-        # function can use!
-
-        self._vocab_final = True
-
-        # The following line of code lets things run to get an answer, but you need not leave it!
-        self._vocab[kUNK] = 0
-
+        self._vocab[kUNK] = len(self._vocab)  # Add <UNK> token at the end
         self._vocab_size = len(self._vocab)
-        assert kUNK in self._vocab
-        if self._vocab_size == 1:
-            logging.warning("Vocab size is very small, this suggests either you didn't implement vocabulary, the dataset is small, or your filters are too aggressive")
 
         logging.debug("%i vocab elements, including: %s" % (self._vocab_size, str(self._vocab.keys())[:60]))
         assert self._vocab_size < self._max_vocab_size, "Vocab size too large %i > %i" % (self._vocab_size, self._max_vocab_size)
+
+        self._vocab_final = True
+        
+        print(f"[finalize_vocab] Vocab size after pruning: {len(self._vocab)}. Expected: <= Max vocab size, considering UNK.")
 
     def finalize_docs(self):
         # You don't need to do anything here        
